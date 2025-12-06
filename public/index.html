@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rubik's Cube Duel Timer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+    }
+    h1 {
+      margin: 16px 0 8px;
+      font-size: 1.5rem;
+    }
+    .subtitle {
+      font-size: 0.9rem;
+      color: #aaa;
+      margin-bottom: 16px;
+      text-align: center;
+      max-width: 480px;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      width: 100%;
+      max-width: 600px;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    .panel {
+      background: #1f1f1f;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 0 16px rgba(0,0,0,0.4);
+    }
+    .panel h2 {
+      margin-top: 0;
+      margin-bottom: 8px;
+      font-size: 1.1rem;
+    }
+    .status {
+      font-size: 0.9rem;
+      margin-bottom: 8px;
+    }
+    .label {
+      font-weight: bold;
+      margin-right: 4px;
+    }
+    .timer {
+      font-size: 2.5rem;
+      font-weight: bold;
+      text-align: center;
+      margin: 8px 0;
+    }
+    .hint {
+      font-size: 0.8rem;
+      color: #999;
+      text-align: center;
+    }
+    .state-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .state-idle {
+      background: #444;
+      color: #ccc;
+    }
+    .state-ready {
+      background: #2e7d32;
+      color: #fff;
+    }
+    .state-running {
+      background: #f9a825;
+      color: #000;
+    }
+    .state-finished {
+      background: #1565c0;
+      color: #fff;
+    }
+    .global {
+      text-align: center;
+      margin-top: 8px;
+      font-size: 0.9rem;
+    }
+    button {
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: none;
+      background: #333;
+      color: #eee;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button:hover {
+      background: #444;
+    }
+    .winner {
+      font-size: 1rem;
+      margin-top: 8px;
+      text-align: center;
+    }
+
+    @media (max-width: 480px) {
+      .timer {
+        font-size: 2rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h1>Rubik's Duel Timer</h1>
+  <div class="subtitle">
+    Hold <b>Space</b> (desktop) or <b>touch &amp; hold</b> (phone) for 1s to get READY.
+    After both have been ready once, the race is armed. Release to start your timer, press/tap again to stop.
+  </div>
+
+  <div class="container">
+    <div class="panel" id="youPanel">
+      <h2>You</h2>
+      <div class="status">
+        <span class="label">State:</span>
+        <span id="youStateBadge" class="state-badge state-idle">Idle</span>
+      </div>
+      <div class="timer" id="youTimer">0.000</div>
+      <div class="hint" id="youHint">Hold to get ready…</div>
+      <div style="text-align:center; margin-top:8px;">
+        <button id="resetBtn" style="display:none;">Reset</button>
+      </div>
+    </div>
+
+    <div class="panel" id="opponentPanel">
+      <h2>Opponent</h2>
+      <div class="status">
+        <span class="label">State:</span>
+        <span id="opStateBadge" class="state-badge state-idle">Waiting</span>
+      </div>
+      <div class="timer" id="opTimer">0.000</div>
+      <div class="hint" id="opHint">Waiting for opponent…</div>
+    </div>
+
+    <div class="panel">
+      <div class="global" id="globalText"></div>
+      <div class="winner" id="winnerText"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+
+    let myId = null;
+
+    // Local state for this client
+    let localState = 'idle'; // 'idle' | 'pre-ready' | 'ready' | 'running' | 'finished'
+    let isHolding = false;
+    let holdTimeout = null;
+    let canStart = false; // Derived from server raceArmed + my finished state
+
+    const youTimerEl = document.getElementById('youTimer');
+    const youStateBadge = document.getElementById('youStateBadge');
+    const youHint = document.getElementById('youHint');
+    const opStateBadge = document.getElementById('opStateBadge');
+    const opTimerEl = document.getElementById('opTimer');
+    const opHint = document.getElementById('opHint');
+    const globalText = document.getElementById('globalText');
+    const winnerText = document.getElementById('winnerText');
+    const resetBtn = document.getElementById('resetBtn');
+
+    function fmt(ms) {
+      if (ms == null) return '0.000';
+      return (ms / 1000).toFixed(3);
+    }
+
+    function setBadge(el, state, text) {
+      el.className = 'state-badge';
+      if (state === 'idle') el.classList.add('state-idle');
+      if (state === 'ready') el.classList.add('state-ready');
+      if (state === 'running') el.classList.add('state-running');
+      if (state === 'finished') el.classList.add('state-finished');
+      el.textContent = text;
+    }
+
+    function updateLocalUI() {
+      if (localState === 'idle') {
+        setBadge(youStateBadge, 'idle', 'Idle');
+        youHint.textContent = 'Hold to get ready…';
+      } else if (localState === 'pre-ready') {
+        setBadge(youStateBadge, 'idle', 'Holding…');
+        youHint.textContent = 'Keep holding for 1 second…';
+      } else if (localState === 'ready') {
+        setBadge(youStateBadge, 'ready', 'Ready');
+        youHint.textContent = canStart
+          ? 'Race armed! Release to start your timer.'
+          : 'Waiting for race to be armed…';
+      } else if (localState === 'running') {
+        setBadge(youStateBadge, 'running', 'Running');
+        youHint.textContent = 'Press/tap again to stop the timer.';
+      } else if (localState === 'finished') {
+        setBadge(youStateBadge, 'finished', 'Finished');
+        youHint.textContent = 'Hold again or press Reset to go again.';
+      }
+
+      // Reset button only visible when finished
+      resetBtn.style.display = localState === 'finished' ? 'inline-block' : 'none';
+    }
+
+    function resetLocal() {
+      localState = 'idle';
+      isHolding = false;
+      canStart = false;
+      clearTimeout(holdTimeout);
+      youTimerEl.textContent = '0.000';
+      winnerText.textContent = '';
+      resetBtn.style.display = 'none';
+      updateLocalUI();
+    }
+
+    // Socket events
+    socket.on('connect', () => {
+      myId = socket.id;
+    });
+
+    socket.on('state', (state) => {
+      const { players, raceArmed } = state;
+      const ids = Object.keys(players);
+      const me = myId && players[myId] ? players[myId] : null;
+      const opponent =
+        ids
+          .filter((id) => id !== myId)
+          .map((id) => players[id])[0] || null;
+
+      // Can I start? Race must be armed and I must not be finished.
+      canStart = !!(raceArmed && me && !me.finished);
+
+      // Update my timer from server
+      if (me) {
+        youTimerEl.textContent = fmt(me.elapsedMs);
+      } else {
+        youTimerEl.textContent = '0.000';
+      }
+
+      // Opponent UI
+      if (!opponent) {
+        setBadge(opStateBadge, 'idle', 'Waiting');
+        opTimerEl.textContent = '0.000';
+        opHint.textContent = 'Waiting for opponent to join…';
+      } else {
+        if (opponent.running) {
+          setBadge(opStateBadge, 'running', 'Running');
+          opHint.textContent = 'Opponent is solving…';
+        } else if (opponent.ready) {
+          setBadge(opStateBadge, 'ready', 'Ready');
+          opHint.textContent = 'Opponent is ready.';
+        } else if (opponent.finished) {
+          setBadge(opStateBadge, 'finished', 'Finished');
+          opHint.textContent = 'Opponent is done.';
+        } else {
+          setBadge(opStateBadge, 'idle', 'Idle');
+          opHint.textContent = 'Opponent is not ready.';
+        }
+        opTimerEl.textContent = fmt(opponent.elapsedMs);
+      }
+
+      // Global text
+      if (ids.length < 2) {
+        globalText.textContent = 'Waiting for second player to join.';
+      } else if (!raceArmed) {
+        globalText.textContent = 'Both of you: hold for 1s to arm the race.';
+      } else {
+        globalText.textContent = 'Race armed! Each of you can release to start your own timer.';
+      }
+
+      // Winner logic
+      if (ids.length === 2) {
+        const [p1, p2] = ids.map((id) => players[id]);
+        if (p1.finished && p2.finished && p1.elapsedMs != null && p2.elapsedMs != null) {
+          if (p1.elapsedMs === p2.elapsedMs) {
+            winnerText.textContent = `Tie! ${fmt(p1.elapsedMs)} vs ${fmt(p2.elapsedMs)}`;
+          } else {
+            const winner = p1.elapsedMs < p2.elapsedMs ? p1 : p2;
+            const loser = winner === p1 ? p2 : p1;
+            const meWon = winner.id === myId;
+            winnerText.textContent = `${meWon ? 'You win!' : 'You lose!'}  ${fmt(
+              winner.elapsedMs
+            )} vs ${fmt(loser.elapsedMs)}`;
+          }
+        }
+      }
+
+      updateLocalUI();
+    });
+
+    // Keyboard input: Spacebar for desktop
+    let spaceDown = false;
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault();
+        if (spaceDown) return;
+        spaceDown = true;
+        handleHoldStart();
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault();
+        spaceDown = false;
+        handleHoldEnd();
+      }
+    });
+
+    // Touch input: whole screen, but ignore Reset button
+    function startTouch(e) {
+      if (e.target.closest('#resetBtn')) return; // let the button click normally
+      e.preventDefault();
+      if (isHolding) return;
+      handleHoldStart();
+    }
+
+    function endTouch(e) {
+      if (e.target.closest('#resetBtn')) return;
+      e.preventDefault();
+      handleHoldEnd();
+    }
+
+    document.body.addEventListener('touchstart', startTouch, { passive: false });
+    document.body.addEventListener('touchend', endTouch, { passive: false });
+    document.body.addEventListener('touchcancel', endTouch, { passive: false });
+
+    function handleHoldStart() {
+      if (localState === 'running') {
+        // Can't start a new hold while running
+        return;
+      }
+
+      if (localState === 'finished') {
+        // Start a new round automatically: reset on server + locally
+        socket.emit('reset');
+        resetLocal();
+      }
+
+      if (isHolding) return;
+      isHolding = true;
+      localState = 'pre-ready';
+      updateLocalUI();
+      clearTimeout(holdTimeout);
+      holdTimeout = setTimeout(() => {
+        if (!isHolding) return;
+        if (localState === 'pre-ready' || localState === 'idle') {
+          localState = 'ready';
+          socket.emit('setReady', true);
+          updateLocalUI();
+        }
+      }, 1000); // 1 second hold to become "Ready"
+    }
+
+    function handleHoldEnd() {
+      clearTimeout(holdTimeout);
+
+      if (localState === 'ready') {
+        if (canStart) {
+          // Start your run
+          localState = 'running';
+          isHolding = false;
+          socket.emit('start');
+        } else {
+          // Released before race armed -> cancel ready
+          localState = 'idle';
+          isHolding = false;
+          socket.emit('setReady', false);
+        }
+        updateLocalUI();
+      } else if (localState === 'pre-ready') {
+        // Didn't hold long enough
+        localState = 'idle';
+        isHolding = false;
+        updateLocalUI();
+      } else if (localState === 'running') {
+        // Stop run
+        isHolding = false;
+        localState = 'finished';
+        socket.emit('stop');
+        updateLocalUI();
+      } else {
+        isHolding = false;
+      }
+    }
+
+    resetBtn.addEventListener('click', () => {
+      resetLocal();
+      socket.emit('reset');
+    });
+
+    // Initial UI
+    resetLocal();
+  </script>
+</body>
+</html>
